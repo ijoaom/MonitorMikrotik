@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mikrotik Bandwidth Monitor</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, Helvetica, sans-serif;
+            background: #f5f5f7;
+            display: flex;
+            justify-content: center;
+            padding: 20px;
+            margin: 0;
+        }
+        .card {
+            width: 100%;
+            max-width: 1200px;
+            background: #fff;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.06);
+        }
+        .header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 15px;
+        }
+        .header h2 {
+            margin: 0;
+            color: #2c3e50;
+        }
+        .status-info {
+            background: #e8f4fd;
+            padding: 10px 15px;
+            border-radius: 8px;
+            border-left: 4px solid #3498db;
+        }
+        .controls {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            margin: 20px 0;
+            flex-wrap: wrap;
+            padding: 15px;
+            background: #f8f9fa;
+            border-radius: 8px;
+        }
+        .chart-container {
+            height: 400px;
+            margin: 20px 0;
+        }
+        .stats-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 12px;
+            margin: 20px 0;
+        }
+        .stat-card {
+            background: #f8f9fa;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            border: 1px solid #dee2e6;
+            transition: transform 0.2s;
+        }
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+        }
+        .stat-card h4 {
+            margin: 0 0 8px 0;
+            font-size: 14px;
+            color: #6c757d;
+            font-weight: normal;
+        }
+        .stat-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #2c3e50;
+        }
+        .rx-value {
+            color: #e74c3c;
+        }
+        .tx-value {
+            color: #3498db;
+        }
+        select, button {
+            padding: 8px 12px;
+            border-radius: 6px;
+            border: 1px solid #ddd;
+            font-size: 14px;
+        }
+        button {
+            background: #3498db;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #2980b9;
+        }
+        button#pause-btn.paused {
+            background: #e74c3c;
+        }
+        button#pause-btn.paused:hover {
+            background: #c0392b;
+        }
+        button#request-history {
+            background: #27ae60;
+        }
+        button#request-history:hover {
+            background: #219a52;
+        }
+        label {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 14px;
+            color: #555;
+        }
+        .alert {
+            padding: 10px;
+            background: #d4edda;
+            color: #155724;
+            border-radius: 6px;
+            margin: 10px 0;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+<div class="card">
+    <div class="header">
+        <div>
+            <h2>Mikrotik Bandwidth Monitor</h2>
+            <div class="status-info">
+                <strong>IP:</strong> 192.168.56.102 | 
+                <strong>Status:</strong> <span id="status-text">Conectando...</span> | 
+                <strong>Última leitura:</strong> <span id="last-read">--:--:--</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="alert" id="history-alert"></div>
+
+    <div class="controls">
+        <label>Interface: 
+            <select id="interface-select">
+                <option value="ether1">ether1</option>
+            </select>
+        </label>
+        <button id="pause-btn">Pausar</button>
+        <button id="request-history">Carregar Histórico</button>
+    </div>
+
+    <div class="chart-container">
+        <canvas id="bandwidthChart"></canvas>
+    </div>
+
+    <div class="stats-container">
+        <div class="stat-card">
+            <h4>Rx Agora</h4>
+            <div id="current-rx" class="stat-value rx-value">0 Mbps</div>
+        </div>
+        <div class="stat-card">
+            <h4>Tx Agora</h4>
+            <div id="current-tx" class="stat-value tx-value">0 Mbps</div>
+        </div>
+        <div class="stat-card">
+            <h4>Avg Rx</h4>
+            <div id="avg-rx" class="stat-value">0 Mbps</div>
+        </div>
+        <div class="stat-card">
+            <h4>Avg Tx</h4>
+            <div id="avg-tx" class="stat-value">0 Mbps</div>
+        </div>
+        <div class="stat-card">
+            <h4>Peak Rx</h4>
+            <div id="peak-rx" class="stat-value">0 Mbps</div>
+        </div>
+        <div class="stat-card">
+            <h4>Peak Tx</h4>
+            <div id="peak-tx" class="stat-value">0 Mbps</div>
+        </div>
+    </div>
+</div>
+
+<script>
+const socket = io();
+let isPaused = false;
+const MAX_PONTOS = 120;
+
+// Configuração do gráfico
+const ctx = document.getElementById('bandwidthChart').getContext('2d');
+const chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+        labels: [],
+        datasets: [
+            {
+                label: 'Rx (Mbps)',
+                data: [],
+                tension: 0.3,
+                fill: false,
+                borderColor: '#e74c3c',
+                backgroundColor: 'rgba(231, 76, 60, 0.1)',
+                borderWidth: 3,
+                pointRadius: 2
+            },
+            {
+                label: 'Tx (Mbps)',
+                data: [],
+                tension: 0.3,
+                fill: false,
+                borderColor: '#3498db',
+                backgroundColor: 'rgba(52, 152, 219, 0.1)',
+                borderWidth: 3,
+                pointRadius: 2
+            }
+        ]
+    },
+    options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        scales: {
+            y: {
+                beginAtZero: true,
+                title: {
+                    display: true,
+                    text: 'Mbps'
+                }
+            },
+            x: {
+                title: {
+                    display: true,
+                    text: 'Tempo'
+                }
+            }
+        },
+        plugins: {
+            legend: {
+                display: true,
+                position: 'top'
+            }
+        }
+    }
+});
+
+// Elementos DOM
+const ifaceSelect = document.getElementById('interface-select');
+const statusText = document.getElementById('status-text');
+const lastReadEl = document.getElementById('last-read');
+const currentRx = document.getElementById('current-rx');
+const currentTx = document.getElementById('current-tx');
+const avgRx = document.getElementById('avg-rx');
+const avgTx = document.getElementById('avg-tx');
+const peakRx = document.getElementById('peak-rx');
+const peakTx = document.getElementById('peak-tx');
+const historyAlert = document.getElementById('history-alert');
+
+// Recebe lista de interfaces
+socket.on('interfaces', function(msg) {
+    const ifaces = msg.interfaces || ['ether1'];
+    ifaceSelect.innerHTML = '';
+    ifaces.forEach(i => {
+        const opt = document.createElement('option');
+        opt.value = i;
+        opt.textContent = i;
+        ifaceSelect.appendChild(opt);
+    });
+});
+
+socket.on('update_status', function(s) {
+    statusText.textContent = s.status;
+    lastReadEl.textContent = s.last_read || '--:--:--';
+});
+
+socket.on('new_data', function(d) {
+    if (isPaused) return;
+    
+    // Atualizar gráfico
+    chart.data.labels.push(d.time);
+    chart.data.datasets[0].data.push(d.rx);
+    chart.data.datasets[1].data.push(d.tx);
+    
+    if (chart.data.labels.length > MAX_PONTOS) {
+        chart.data.labels.shift();
+        chart.data.datasets[0].data.shift();
+        chart.data.datasets[1].data.shift();
+    }
+    chart.update();
+
+    // Atualizar métricas em tempo real
+    currentRx.textContent = d.rx + ' Mbps';
+    currentTx.textContent = d.tx + ' Mbps';
+    avgRx.textContent = (d.avg_rx || 0) + ' Mbps';
+    avgTx.textContent = (d.avg_tx || 0) + ' Mbps';
+    peakRx.textContent = (d.peak_rx || 0) + ' Mbps';
+    peakTx.textContent = (d.peak_tx || 0) + ' Mbps';
+    lastReadEl.textContent = d.time;
+});
+
+// ✅ BOTÃO CARREGAR HISTÓRICO FUNCIONANDO
+socket.on('history', function(msg) {
+    const h = msg.history || [];
+    chart.data.labels = h.map(i => i.time);
+    chart.data.datasets[0].data = h.map(i => i.rx);
+    chart.data.datasets[1].data = h.map(i => i.tx);
+    chart.update();
+    
+    // Mostrar alerta de sucesso
+    historyAlert.textContent = msg.mensagem || `Histórico carregado: ${h.length} pontos`;
+    historyAlert.style.display = 'block';
+    historyAlert.style.background = '#d4edda';
+    historyAlert.style.color = '#155724';
+    
+    setTimeout(() => {
+        historyAlert.style.display = 'none';
+    }, 5000);
+});
+
+socket.on('history_error', function(msg) {
+    historyAlert.textContent = msg.erro || 'Erro ao carregar histórico';
+    historyAlert.style.display = 'block';
+    historyAlert.style.background = '#f8d7da';
+    historyAlert.style.color = '#721c24';
+});
+
+// Interações do usuário
+ifaceSelect.addEventListener('change', () => {
+    socket.emit('change_interface', { interface: ifaceSelect.value });
+});
+
+const pauseBtn = document.getElementById('pause-btn');
+pauseBtn.addEventListener('click', () => {
+    isPaused = !isPaused;
+    pauseBtn.textContent = isPaused ? 'Retomar' : 'Pausar';
+    pauseBtn.classList.toggle('paused', isPaused);
+    socket.emit('pause', { pause: isPaused });
+});
+
+// ✅ BOTÃO CARREGAR HISTÓRICO AGORA FUNCIONA
+const historyBtn = document.getElementById('request-history');
+historyBtn.addEventListener('click', () => {
+    socket.emit('request_history');
+    historyAlert.textContent = 'Carregando histórico...';
+    historyAlert.style.display = 'block';
+    historyAlert.style.background = '#fff3cd';
+    historyAlert.style.color = '#856404';
+});
+
+// Indicador de conexão
+socket.on('connect', () => {
+    statusText.textContent = 'Conectado';
+    statusText.style.color = '#27ae60';
+});
+
+socket.on('disconnect', () => {
+    statusText.textContent = 'Desconectado';
+    statusText.style.color = '#e74c3c';
+});
+</script>
+</body>
+</html>
