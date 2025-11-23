@@ -126,8 +126,6 @@
         }
         .alert {
             padding: 10px;
-            background: #d4edda;
-            color: #155724;
             border-radius: 6px;
             margin: 10px 0;
             display: none;
@@ -306,7 +304,7 @@ socket.on('new_data', function(d) {
     lastReadEl.textContent = d.time;
 });
 
-// ✅ BOTÃO CARREGAR HISTÓRICO FUNCIONANDO
+// Botão Carregar Histórico
 socket.on('history', function(msg) {
     const h = msg.history || [];
     chart.data.labels = h.map(i => i.time);
@@ -314,7 +312,6 @@ socket.on('history', function(msg) {
     chart.data.datasets[1].data = h.map(i => i.tx);
     chart.update();
     
-    // Mostrar alerta de sucesso
     historyAlert.textContent = msg.mensagem || `Histórico carregado: ${h.length} pontos`;
     historyAlert.style.display = 'block';
     historyAlert.style.background = '#d4edda';
@@ -345,7 +342,6 @@ pauseBtn.addEventListener('click', () => {
     socket.emit('pause', { pause: isPaused });
 });
 
-// ✅ BOTÃO CARREGAR HISTÓRICO AGORA FUNCIONA
 const historyBtn = document.getElementById('request-history');
 historyBtn.addEventListener('click', () => {
     socket.emit('request_history');
