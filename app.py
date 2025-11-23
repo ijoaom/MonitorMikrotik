@@ -15,13 +15,11 @@ socketio = SocketIO(app)
 
 thread_iniciada = False
 historico_dados = []
-MAX_HISTORICO = 100
+MAX_HISTORICO = 120
 
-def testar_conexao_mikrotik():
-    """Testa a conexão de forma mais robusta"""
+def conectar_mikrotik():
+    """Conecta ao MikroTik e retorna a API"""
     try:
-        print(f"🔌 Testando conexão com {HOST}...")
-        
         connection = routeros_api.RouterOsApiPool(
             host=HOST,
             username=USUARIO, 
@@ -30,205 +28,139 @@ def testar_conexao_mikrotik():
             use_ssl=False,
             port=8728
         )
-        
         api = connection.get_api()
-        test = api.get_resource('/system/identity').get()
-        if test:
-            print("✅ Conexão estabelecida com sucesso!")
-            return api, connection
-        else:
-            print("❌ Conexão falhou no teste")
-            return None, None
-            
+        return api, connection
     except Exception as e:
         print(f"❌ Erro na conexão: {e}")
         return None, None
 
-def coletar_dados_bandwidth(api):
-    """Coleta dados de bandwidth de forma segura"""
-    try:
-        # Método direto com interface
-        interface_resource = api.get_resource('/interface')
-        interface_data = interface_resource.get(name='ether1')
-        
-        if interface_data and len(interface_data) > 0:
-            data = interface_data[0]
-            rx_bytes = int(data.get('rx-byte', 0))
-            tx_bytes = int(data.get('tx-byte', 0))
-            
-            # Converter bytes para bits
-            rx_bps = rx_bytes * 8
-            tx_bps = tx_bytes * 8
-            return rx_bps, tx_bps
-            
-        return 0, 0
-        
-    except Exception as e:
-        print(f"❌ Erro na coleta de dados: {e}")
-        return 0, 0
-
 def monitor_bandwidth():
-    """Função principal de monitoramento"""
+    """Função principal que busca os dados IGUAIS ao WinBox"""
     global thread_iniciada, historico_dados
     
-    print("📊 Iniciando monitoramento de banda...")
+    print("📊 Iniciando monitoramento de banda (Modo Real-Time)...")
     
-    # ✅ CORREÇÃO: Inicializar listas vazias
     rx_historico = []
     tx_historico = []
-    historico_max = 10
+    historico_medias = 10 # Para calcular média móvel rápida
     
     while True:
         try:
-            # Estabelecer conexão
-            api, conexao = testar_conexao_mikrotik()
+            api, conexao = conectar_mikrotik()
             
             if not api:
-                print("❌ Falha na conexão, tentando novamente em 3 segundos...")
                 socketio.emit('update_status', {
                     'status': 'Desconectado', 
-                    'last_read': time.strftime('%H:%M:%S')
+                    'last_read': '--:--:--'
                 })
                 time.sleep(3)
                 continue
             
-            # Coletar dados
-            rx_bps, tx_bps = coletar_dados_bandwidth(api)
-            
-            # Fechar conexão após uso
-            try:
-                conexao.disconnect()
-            except:
-                pass
-            
-            # Converter para Mbps
-            rx_mbps = round(rx_bps / 1_000_000, 2)
-            tx_mbps = round(tx_bps / 1_000_000, 2)
-            
-            print(f"📊 Dados coletados - Rx: {rx_mbps} Mbps, Tx: {tx_mbps} Mbps")
-            
-            # ✅ CORREÇÃO: Adicionar valores corretos às listas
-            rx_historico.append(rx_mbps)
-            tx_historico.append(tx_mbps)  # ✅ CORRIGIDO: era tx_historico.append(tx_historico)
-            
-            if len(rx_historico) > historico_max:
-                rx_historico.pop(0)
-                tx_historico.pop(0)
-            
-            # ✅ SALVAR NO HISTÓRICO GLOBAL (para o botão)
-            tempo_atual = time.strftime('%H:%M:%S')
-            ponto_historico = {
-                'rx': rx_mbps,
-                'tx': tx_mbps,
-                'time': tempo_atual
-            }
-            historico_dados.append(ponto_historico)
-            
-            # Manter histórico limitado
-            if len(historico_dados) > MAX_HISTORICO:
-                historico_dados.pop(0)
-            
-            # Calcular estatísticas
-            avg_rx = round(sum(rx_historico) / len(rx_historico), 2) if rx_historico else 0
-            avg_tx = round(sum(tx_historico) / len(tx_historico), 2) if tx_historico else 0
-            peak_rx = round(max(rx_historico), 2) if rx_historico else 0
-            peak_tx = round(max(tx_historico), 2) if tx_historico else 0
-            
-            # Emitir dados para o frontend
-            socketio.emit('new_data', {
-                'rx': rx_mbps,
-                'tx': tx_mbps, 
-                'time': tempo_atual,
-                'avg_rx': avg_rx,
-                'avg_tx': avg_tx,
-                'peak_rx': peak_rx,
-                'peak_tx': peak_tx
-            })
-            
-            socketio.emit('update_status', {
-                'status': 'Conectado',
-                'last_read': tempo_atual
-            })
-            
-            time.sleep(1)
-            
+            # Pegamos o recurso de interface
+            interface_resource = api.get_resource('/interface')
+
+            while True: # Loop interno para manter a conexão ativa
+                try:
+                    # --- A MÁGICA ESTÁ AQUI ---
+                    # Usamos 'monitor-traffic' igual ao WinBox
+                    # duration=1 faz ele calcular a média exata do último segundo
+                    trafego = interface_resource.call(
+                        'monitor-traffic',
+                        {'interface': 'ether1', 'duration': '1'}
+                    )
+                    
+                    if trafego:
+                        dados = trafego[0]
+                        
+                        # O RouterOS já devolve a velocidade em bits por segundo (bps)
+                        rx_bps = int(dados.get('rx-bits-per-second', 0))
+                        tx_bps = int(dados.get('tx-bits-per-second', 0))
+                        
+                        # Converter para Mbps
+                        rx_mbps = round(rx_bps / 1_000_000, 2)
+                        tx_mbps = round(tx_bps / 1_000_000, 2)
+                        
+                        tempo_atual = time.strftime('%H:%M:%S')
+                        
+                        # Atualizar listas para médias
+                        rx_historico.append(rx_mbps)
+                        tx_historico.append(tx_mbps)
+                        if len(rx_historico) > historico_medias:
+                            rx_historico.pop(0)
+                            tx_historico.pop(0)
+                        
+                        # Calcular Estatísticas
+                        avg_rx = round(sum(rx_historico) / len(rx_historico), 2)
+                        avg_tx = round(sum(tx_historico) / len(tx_historico), 2)
+                        peak_rx = max(rx_historico)
+                        peak_tx = max(tx_historico)
+
+                        # Salvar histórico global
+                        ponto = {
+                            'rx': rx_mbps,
+                            'tx': tx_mbps,
+                            'time': tempo_atual
+                        }
+                        historico_dados.append(ponto)
+                        if len(historico_dados) > MAX_HISTORICO:
+                            historico_dados.pop(0)
+
+                        print(f"📡 WinBox Data -> Rx: {rx_mbps} Mbps | Tx: {tx_mbps} Mbps")
+
+                        # Enviar para o Frontend
+                        socketio.emit('new_data', {
+                            'rx': rx_mbps,
+                            'tx': tx_mbps, 
+                            'time': tempo_atual,
+                            'avg_rx': avg_rx,
+                            'avg_tx': avg_tx,
+                            'peak_rx': peak_rx,
+                            'peak_tx': peak_tx
+                        })
+                        
+                        socketio.emit('update_status', {
+                            'status': 'Monitorando',
+                            'last_read': tempo_atual
+                        })
+                    
+                except Exception as e:
+                    print(f"Erro na leitura: {e}")
+                    break # Sai do loop interno para reconectar
+                
         except Exception as e:
-            print(f"💥 Erro no loop principal: {e}")
+            print(f"💥 Erro fatal: {e}")
             time.sleep(3)
+        
+        # Garante desconexão limpa antes de tentar reconectar
+        try:
+            if 'conexao' in locals():
+                conexao.disconnect()
+        except:
+            pass
 
 def obter_historico():
-    """Retorna o histórico de dados para o frontend"""
-    return historico_dados[-30:]  # Retorna últimos 30 pontos
+    return historico_dados
 
 @app.route('/')
 def index():
     return render_template('index.html')
 
 @socketio.on('connect')
-def handle_connect(auth):
+def handle_connect():
     global thread_iniciada
-    print("👤 Cliente conectado via SocketIO")
+    print("👤 Cliente conectado")
     
-    # Enviar interfaces disponíveis
-    try:
-        api_temp, conn_temp = testar_conexao_mikrotik()
-        if api_temp:
-            interfaces = api_temp.get_resource('/interface').get()
-            interface_names = [interface['name'] for interface in interfaces]
-            socketio.emit('interfaces', {'interfaces': interface_names})
-            conn_temp.disconnect()
-    except Exception as e:
-        print(f"Erro ao obter interfaces: {e}")
-    
-    socketio.emit('update_status', {
-        'status': 'Iniciando...',
-        'last_read': time.strftime('%H:%M:%S')
-    })
+    # Enviar interfaces (simples)
+    socketio.emit('interfaces', {'interfaces': ['ether1']})
     
     if not thread_iniciada:
-        print("🚀 Iniciando thread de monitoramento...")
         socketio.start_background_task(monitor_bandwidth)
         thread_iniciada = True
 
-@socketio.on('change_interface')
-def handle_change_interface(data):
-    print(f"🔧 Interface alterada: {data.get('interface')}")
-
-@socketio.on('pause')
-def handle_pause(data):
-    estado = "pausado" if data.get('pause') else "retomado"
-    print(f"⏸️  Monitoramento {estado}")
-
-# ✅ BOTÃO CARREGAR HISTÓRICO FUNCIONANDO
 @socketio.on('request_history')
 def handle_request_history():
-    print("📋 Histórico solicitado - enviando dados...")
-    try:
-        historico = obter_historico()
-        socketio.emit('history', {
-            'history': historico,
-            'total_pontos': len(historico),
-            'mensagem': f'Carregados {len(historico)} pontos de histórico'
-        })
-        print(f"✅ Histórico enviado: {len(historico)} pontos")
-    except Exception as e:
-        print(f"❌ Erro ao enviar histórico: {e}")
-        socketio.emit('history_error', {
-            'erro': 'Falha ao carregar histórico'
-        })
+    socketio.emit('history', {'history': obter_historico()})
 
 if __name__ == '__main__':
     print("🚀 Servidor iniciando em http://127.0.0.1:5000")
-    
-    # Teste inicial
-    api_test, conn_test = testar_conexao_mikrotik()
-    if api_test:
-        print("✅ Conectividade OK - Servidor pronto!")
-        try:
-            conn_test.disconnect()
-        except:
-            pass
-    else:
-        print("⚠️  Aviso: Não foi possível conectar ao MikroTik")
-    
     socketio.run(app, host='127.0.0.1', port=5000, debug=False)
